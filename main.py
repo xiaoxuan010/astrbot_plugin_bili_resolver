@@ -39,6 +39,14 @@ BILI_PATTERN = re.compile(
     re.I,
 )
 
+BARE_BVID_PATTERN = re.compile(r"BV[A-Za-z0-9]{10}", re.I)
+BILI_URL_SOURCE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9.-])"
+    r"(?:b23\.tv|bili(?:22|23|33|2233)\.cn|"
+    r"(?:[\w-]+\.)*bilibili\.com)(?:[/:?]|$)",
+    re.I,
+)
+
 IMAGE_SUFFIXES: Set[str] = {
     ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".jfif", ".webp",
 }
@@ -56,6 +64,17 @@ _ALLOWED_DOMAINS = (
     "bili23.cn",
     "bili33.cn",
 )
+
+
+def _classify_message_source(text: str, card_url: str = "") -> str:
+    """Classify the original message before URL normalization."""
+    if card_url:
+        return "card"
+    if BILI_URL_SOURCE_PATTERN.search(text):
+        return "url"
+    if BARE_BVID_PATTERN.fullmatch(text.strip()):
+        return "bvid"
+    return "text"
 
 
 def _is_allowed_domain(url: str) -> bool:
@@ -288,6 +307,7 @@ class BilibiliAnalysis(Star):
             return
 
         text = event.message_str.strip()
+        original_text = text
 
         # 尝试从 QQ小程序 JSON 卡片中提取 URL
         json_url = ""
@@ -309,6 +329,8 @@ class BilibiliAnalysis(Star):
         if not json_url and text.startswith("{"):
             json_url = _try_parse_json(text)
 
+        source = _classify_message_source(original_text, json_url)
+
         if json_url:
             logger.info(f"从 JSON 卡片提取到 URL: {json_url}")
             text = json_url
@@ -322,7 +344,12 @@ class BilibiliAnalysis(Star):
             ):
                 text = await b23_extract(text, session=session)
 
-            msg = await bili_keyword(group_id, text, session=session)
+            msg = await bili_keyword(
+                group_id,
+                text,
+                session=session,
+                source=source,
+            )
         except Exception as e:
             logger.error(f"Bilibili 解析出错: {e!r}", exc_info=True)
             return
@@ -374,7 +401,12 @@ class BilibiliAnalysis(Star):
                 yield event.plain_result("未找到相关视频")
                 return
 
-            msg = await bili_keyword(group_id, search_url, session=session)
+            msg = await bili_keyword(
+                group_id,
+                search_url,
+                session=session,
+                source="text",
+            )
         except Exception as e:
             logger.error(f"Bilibili 搜索出错: {e!r}", exc_info=True)
             yield event.plain_result("搜索出错，请稍后再试")

@@ -46,7 +46,10 @@ def resize_image(src: str, is_cover: bool = False) -> str:
 
 
 async def bili_keyword(
-    group_id: Optional[str], text: str, session: ClientSession
+    group_id: Optional[str],
+    text: str,
+    session: ClientSession,
+    source: str = "text",
 ) -> Union[List[Union[List[str], str]], str]:
     try:
         # 提取url
@@ -62,7 +65,11 @@ async def bili_keyword(
         msg, vurl = "", ""
         if "view?" in url:
             msg, vurl = await video_detail(
-                url, page=page, time_location=time_location, session=session
+                url,
+                page=page,
+                time_location=time_location,
+                session=session,
+                source=source,
             )
         elif "bangumi" in url:
             msg, vurl = await bangumi_detail(url, time_location, session)
