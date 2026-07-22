@@ -57,6 +57,7 @@ def _render_conditionals(template: str, source: str) -> str:
     branch_matched = False
     branch_active = True
     else_seen = False
+    saw_control_tag = False
 
     for line_number, line in enumerate(template.splitlines(keepends=True), 1):
         stripped = line.strip()
@@ -71,6 +72,7 @@ def _render_conditionals(template: str, source: str) -> str:
             raise TemplateSyntaxError(
                 f"第 {line_number} 行的控制标签必须独占一行"
             )
+        saw_control_tag = True
 
         condition = _CONDITION_TAG_PATTERN.fullmatch(stripped)
         if condition:
@@ -137,7 +139,8 @@ def _render_conditionals(template: str, source: str) -> str:
     if in_block:
         raise TemplateSyntaxError("条件块缺少 endif")
 
-    return "".join(output)
+    result = "".join(output)
+    return result.rstrip("\r\n") if saw_control_tag else result
 
 
 def resize_image(src: str, is_cover: bool = False) -> str:
@@ -355,6 +358,8 @@ def _apply_template(
         result = result.replace(f"${{{key}}}", str(value))
 
     if "${封面}" in result:
+        # 封面独占一行时，图片组件后的文本不应以换行开始。
+        result = re.sub(r"(?m)^[ \t]*\$\{封面\}\r?\n", "${封面}", result)
         parts = result.split("${封面}")
         msg_list = []
         for i, part in enumerate(parts):

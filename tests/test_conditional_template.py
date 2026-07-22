@@ -45,13 +45,19 @@ def test_preserves_legacy_template_exactly():
     assert analysis_bilibili._render_conditionals(template, "miniapp") == template
 
 
+def test_removes_trailing_newline_before_endif():
+    template = '{% if source == "bvid" %}\n${链接}\n{% endif %}'
+
+    assert analysis_bilibili._render_conditionals(template, "bvid") == "${链接}"
+
+
 def test_renders_two_sequential_blocks():
     template = (
         "{% if source == \"url\" %}\nURL-A\n{% else %}\nOTHER-A\n{% endif %}\n"
         "{% if source == \"url\" %}\nURL-B\n{% endif %}\n"
     )
     assert analysis_bilibili._render_conditionals(template, "url") == (
-        "URL-A\nURL-B\n"
+        "URL-A\nURL-B"
     )
 
 
@@ -102,7 +108,7 @@ def test_apply_template_skips_cover_in_unselected_branch():
         source="miniapp",
     )
 
-    assert rendered == ["https://www.bilibili.com/video/av123\n"]
+    assert rendered == ["https://www.bilibili.com/video/av123"]
 
 
 def test_apply_template_emits_cover_in_selected_branch():
@@ -122,7 +128,7 @@ def test_apply_template_emits_cover_in_selected_branch():
     assert rendered == [
         "封面：\n",
         "https://example.com/cover.jpg",
-        "\n完成\n",
+        "完成",
     ]
 
 
@@ -138,16 +144,16 @@ def test_apply_template_substitutes_variables_after_branch_selection():
         source="url",
     )
 
-    assert rendered == ["BV1xx411c7mD\n"]
+    assert rendered == ["BV1xx411c7mD"]
 
 
 @pytest.mark.parametrize(
     ("source", "expected"),
     [
-        ("miniapp", "🔗 https://www.bilibili.com/video/av123\n"),
-        ("card", "🔗 https://www.bilibili.com/video/av123\n"),
-        ("url", "BV1xx411c7mD\n"),
-        ("bvid", "https://www.bilibili.com/video/av123\n"),
+        ("miniapp", "🔗 https://www.bilibili.com/video/av123"),
+        ("card", "🔗 https://www.bilibili.com/video/av123"),
+        ("url", "BV1xx411c7mD"),
+        ("bvid", "https://www.bilibili.com/video/av123"),
     ],
 )
 def test_recommended_template_matches_source_contract(source, expected):
@@ -243,7 +249,7 @@ def test_video_detail_passes_source_to_custom_template(monkeypatch):
         )
     )
 
-    assert message == ["BV1xx411c7mD\n"]
+    assert message == ["BV1xx411c7mD"]
 
 
 def test_video_detail_falls_back_on_template_syntax_error(monkeypatch):
