@@ -10,7 +10,9 @@ def test_conditional_renderer_api_exists():
 
 SOURCE_TEMPLATE = (
     "prefix\n"
-    "{% if source == \"card\" %}\n"
+    "{% if source == \"miniapp\" %}\n"
+    "miniapp\n"
+    "{% elif source == \"card\" %}\n"
     "card\n"
     "{% elif source == \"url\" %}\n"
     "url\n"
@@ -26,6 +28,7 @@ SOURCE_TEMPLATE = (
 @pytest.mark.parametrize(
     ("source", "expected_branch"),
     [
+        ("miniapp", "miniapp"),
         ("card", "card"),
         ("url", "url"),
         ("bvid", "bvid"),
@@ -39,7 +42,7 @@ def test_selects_source_branch(source, expected_branch):
 
 def test_preserves_legacy_template_exactly():
     template = "🎬 ${标题}\r\n${封面}\r\n🔗 ${链接}"
-    assert analysis_bilibili._render_conditionals(template, "card") == template
+    assert analysis_bilibili._render_conditionals(template, "miniapp") == template
 
 
 def test_renders_two_sequential_blocks():
@@ -65,7 +68,7 @@ def test_renders_two_sequential_blocks():
         ("{% if source == \"url\" %}\nx\n", "缺少 endif"),
         (
             "{% if source == \"url\" %}\n"
-            "{% if source == \"card\" %}\nx\n"
+            "{% if source == \"miniapp\" %}\nx\n"
             "{% endif %}\n{% endif %}\n",
             "嵌套",
         ),
@@ -85,7 +88,7 @@ def test_rejects_unknown_runtime_source():
 
 def test_apply_template_skips_cover_in_unselected_branch():
     template = (
-        "{% if source == \"card\" %}\n"
+        "{% if source == \"miniapp\" %}\n"
         "${链接}\n"
         "{% else %}\n"
         "${封面}\n"
@@ -96,7 +99,7 @@ def test_apply_template_skips_cover_in_unselected_branch():
         template,
         {"链接": "https://www.bilibili.com/video/av123"},
         "https://example.com/cover.jpg",
-        source="card",
+        source="miniapp",
     )
 
     assert rendered == ["https://www.bilibili.com/video/av123\n"]
@@ -141,6 +144,7 @@ def test_apply_template_substitutes_variables_after_branch_selection():
 @pytest.mark.parametrize(
     ("source", "expected"),
     [
+        ("miniapp", "🔗 https://www.bilibili.com/video/av123\n"),
         ("card", "🔗 https://www.bilibili.com/video/av123\n"),
         ("url", "BV1xx411c7mD\n"),
         ("bvid", "https://www.bilibili.com/video/av123\n"),
@@ -148,7 +152,9 @@ def test_apply_template_substitutes_variables_after_branch_selection():
 )
 def test_recommended_template_matches_source_contract(source, expected):
     template = (
-        "{% if source == \"card\" %}\n"
+        "{% if source == \"miniapp\" %}\n"
+        "🔗 ${链接}\n"
+        "{% elif source == \"card\" %}\n"
         "🔗 ${链接}\n"
         "{% elif source == \"url\" %}\n"
         "${BV号}\n"

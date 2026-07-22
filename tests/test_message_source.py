@@ -1,21 +1,38 @@
 import asyncio
 import inspect
 import json
+from sys import maxsize
 from types import SimpleNamespace
 
 import pytest
 from astrbot_plugin_bili_resolver import analysis_bilibili, main
 
+from astrbot.core.star.star_handler import star_handlers_registry
+
 
 class FakeEvent:
-    def __init__(self, message_str, raw_message=None):
+    def __init__(
+        self,
+        message_str,
+        raw_message=None,
+        sender_id="",
+        self_id="",
+    ):
         self.message_str = message_str
         self.message_obj = SimpleNamespace(
             group_id=None,
             raw_message=raw_message,
             message=[],
         )
+        self.sender_id = sender_id
+        self.self_id = self_id
         self.stopped = False
+
+    def get_sender_id(self):
+        return self.sender_id
+
+    def get_self_id(self):
+        return self.self_id
 
     def stop_event(self):
         self.stopped = True
@@ -42,6 +59,37 @@ async def collect_async_generator(generator):
 
 def test_source_classifier_api_exists():
     assert hasattr(main, "_classify_message_source")
+
+
+def test_bili_handler_runs_before_group_agent_flow_priority():
+    handler = star_handlers_registry.get_handler_by_full_name(
+        "astrbot_plugin_bili_resolver.main_on_message"
+    )
+
+    assert handler is not None
+    assert handler.extras_configs["priority"] > maxsize - 20
+
+
+def test_on_message_ignores_bot_echo(monkeypatch):
+    event = FakeEvent("BV1UJKh6HEC4", sender_id="2736217268", self_id="2736217268")
+    called = False
+
+    async def fake_get_session(self):
+        return object()
+
+    async def fake_bili_keyword(*args, **kwargs):
+        nonlocal called
+        called = True
+        return ["unexpected"]
+
+    monkeypatch.setattr(main.BilibiliAnalysis, "_get_session", fake_get_session)
+    monkeypatch.setattr(main, "bili_keyword", fake_bili_keyword)
+
+    results = asyncio.run(collect_async_generator(make_plugin().on_message(event)))
+
+    assert results == []
+    assert not event.stopped
+    assert not called
 
 
 @pytest.mark.parametrize(
@@ -83,7 +131,26 @@ def test_classifies_realistic_onebot_bilibili_card():
     card_url = main._extract_from_raw_message(raw_message)
 
     assert card_url == "https://b23.tv/4Do4uFm?share_source=qq"
-    assert main._classify_message_source("", card_url) == "card"
+    assert main._classify_message_source("", card_url, "miniapp") == "miniapp"
+
+
+def test_extracts_bilibili_url_from_qq_news_share_card():
+    payload = {
+        "app": "com.tencent.tuwen.lua",
+        "meta": {
+            "news": {
+                "jumpUrl": "https://b23.tv/pc1grH5?share_source=qq",
+                "tag": "哔哩哔哩",
+            }
+        },
+    }
+
+    card_url = main._extract_from_raw_message(
+        [{"type": "json", "data": {"data": json.dumps(payload)}}]
+    )
+
+    assert card_url == "https://b23.tv/pc1grH5?share_source=qq"
+    assert main._classify_message_source("", card_url, "card") == "card"
 
 
 def test_bili_keyword_accepts_source_parameter():
@@ -115,12 +182,12 @@ def test_bili_keyword_passes_source_to_video_detail(monkeypatch):
             None,
             "BV1xx411c7mD",
             session=object(),
-            source="card",
+            source="miniapp",
         )
     )
 
     assert result == ["ok"]
-    assert captured["source"] == "card"
+    assert captured["source"] == "miniapp"
 
 
 @pytest.mark.parametrize(
@@ -133,9 +200,10 @@ def test_bili_keyword_passes_source_to_video_detail(monkeypatch):
                     {
                         "type": "json",
                         "data": {
-                            "data": json.dumps(
-                                {
-                                    "meta": {
+                                "data": json.dumps(
+                                    {
+                                        "app": "com.tencent.miniapp_01",
+                                        "meta": {
                                         "detail_1": {
                                             "qqdocurl": "https://b23.tv/card123"
                                         }
@@ -146,7 +214,7 @@ def test_bili_keyword_passes_source_to_video_detail(monkeypatch):
                     }
                 ],
             ),
-            "card",
+            "miniapp",
             "https://www.bilibili.com/video/BV1xx411c7mD",
         ),
         (
