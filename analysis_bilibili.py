@@ -35,6 +35,113 @@ images_size = ""
 cover_images_size = ""
 analysis_video_template = ""
 
+TEMPLATE_SOURCES = frozenset({"miniapp", "card", "url", "bvid", "text"})
+_CONDITION_TAG_PATTERN = re.compile(
+    r"{%\s*(if|elif)\s+source\s*==\s*(['\"])([^'\"]+)\2\s*%}"
+)
+_ELSE_TAG_PATTERN = re.compile(r"{%\s*else\s*%}")
+_ENDIF_TAG_PATTERN = re.compile(r"{%\s*endif\s*%}")
+
+
+class TemplateSyntaxError(ValueError):
+    """Raised when a custom template contains invalid control syntax."""
+
+
+def _render_conditionals(template: str, source: str) -> str:
+    """Render source conditionals before placeholder substitution."""
+    if source not in TEMPLATE_SOURCES:
+        raise TemplateSyntaxError(f"未知消息来源: {source}")
+
+    output = []
+    in_block = False
+    branch_matched = False
+    branch_active = True
+    else_seen = False
+    saw_control_tag = False
+
+    for line_number, line in enumerate(template.splitlines(keepends=True), 1):
+        stripped = line.strip()
+        has_control_marker = "{%" in line or "%}" in line
+
+        if not has_control_marker:
+            if not in_block or branch_active:
+                output.append(line)
+            continue
+
+        if not (stripped.startswith("{%") and stripped.endswith("%}")):
+            raise TemplateSyntaxError(
+                f"第 {line_number} 行的控制标签必须独占一行"
+            )
+        saw_control_tag = True
+
+        condition = _CONDITION_TAG_PATTERN.fullmatch(stripped)
+        if condition:
+            tag_type, _, expected_source = condition.groups()
+            if expected_source not in TEMPLATE_SOURCES:
+                raise TemplateSyntaxError(
+                    f"第 {line_number} 行使用了未知来源: {expected_source}"
+                )
+
+            if tag_type == "if":
+                if in_block:
+                    raise TemplateSyntaxError(
+                        f"第 {line_number} 行出现嵌套条件"
+                    )
+                in_block = True
+                branch_matched = source == expected_source
+                branch_active = branch_matched
+                else_seen = False
+                continue
+
+            if not in_block:
+                raise TemplateSyntaxError(
+                    f"第 {line_number} 行的 elif 缺少 if"
+                )
+            if else_seen:
+                raise TemplateSyntaxError(
+                    f"第 {line_number} 行的 elif 位于 else 之后"
+                )
+            branch_active = (
+                not branch_matched and source == expected_source
+            )
+            branch_matched = branch_matched or branch_active
+            continue
+
+        if _ELSE_TAG_PATTERN.fullmatch(stripped):
+            if not in_block:
+                raise TemplateSyntaxError(
+                    f"第 {line_number} 行的 else 缺少 if"
+                )
+            if else_seen:
+                raise TemplateSyntaxError(
+                    f"第 {line_number} 行出现重复 else"
+                )
+            else_seen = True
+            branch_active = not branch_matched
+            branch_matched = True
+            continue
+
+        if _ENDIF_TAG_PATTERN.fullmatch(stripped):
+            if not in_block:
+                raise TemplateSyntaxError(
+                    f"第 {line_number} 行的 endif 缺少 if"
+                )
+            in_block = False
+            branch_matched = False
+            branch_active = True
+            else_seen = False
+            continue
+
+        raise TemplateSyntaxError(
+            f"第 {line_number} 行包含不支持的控制标签: {stripped}"
+        )
+
+    if in_block:
+        raise TemplateSyntaxError("条件块缺少 endif")
+
+    result = "".join(output)
+    return result.rstrip("\r\n") if saw_control_tag else result
+
 
 def resize_image(src: str, is_cover: bool = False) -> str:
     img_type = src[-3:]
@@ -46,7 +153,10 @@ def resize_image(src: str, is_cover: bool = False) -> str:
 
 
 async def bili_keyword(
-    group_id: Optional[str], text: str, session: ClientSession
+    group_id: Optional[str],
+    text: str,
+    session: ClientSession,
+    source: str = "text",
 ) -> Union[List[Union[List[str], str]], str]:
     try:
         # 提取url
@@ -62,7 +172,11 @@ async def bili_keyword(
         msg, vurl = "", ""
         if "view?" in url:
             msg, vurl = await video_detail(
-                url, page=page, time_location=time_location, session=session
+                url,
+                page=page,
+                time_location=time_location,
+                session=session,
+                source=source,
             )
         elif "bangumi" in url:
             msg, vurl = await bangumi_detail(url, time_location, session)
@@ -232,13 +346,20 @@ def _truncate_desc(desc: str, max_lines: int = 3) -> str:
     return "\n".join(lines)
 
 
-def _apply_template(template: str, data: dict, cover_url: str) -> list:
+def _apply_template(
+    template: str,
+    data: dict,
+    cover_url: str,
+    source: str = "text",
+) -> list:
     """将模板中的变量替换为实际值，${封面} 拆分为独立的图片元素"""
-    result = template
+    result = _render_conditionals(template, source)
     for key, value in data.items():
         result = result.replace(f"${{{key}}}", str(value))
 
     if "${封面}" in result:
+        # 封面独占一行时，图片组件后的文本不应以换行开始。
+        result = re.sub(r"(?m)^[ \t]*\$\{封面\}\r?\n", "${封面}", result)
         parts = result.split("${封面}")
         msg_list = []
         for i, part in enumerate(parts):
@@ -308,8 +429,19 @@ async def video_detail(
                 "时长": _format_duration(res.get("duration", 0)),
                 "版权": "原创" if res.get("copyright") == 1 else "转载",
             }
-            msg = _apply_template(analysis_video_template, data, cover)
-            return msg, vurl
+            try:
+                msg = _apply_template(
+                    analysis_video_template,
+                    data,
+                    cover,
+                    source=kwargs.get("source", "text"),
+                )
+            except TemplateSyntaxError as e:
+                logger.error(
+                    f"自定义视频模板语法错误，回退到原始格式: {e}"
+                )
+            else:
+                return msg, vurl
 
         tname = (
             f"类型：{res['tname']} | UP：{res['owner']['name']} "

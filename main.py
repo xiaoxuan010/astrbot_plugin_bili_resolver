@@ -1,15 +1,17 @@
-import re
 import json
+import re
 import urllib.parse
 from pathlib import PurePosixPath
+from sys import maxsize
 from typing import List, Optional, Set, Union
 
 import aiohttp
 from aiohttp import ClientSession, ClientTimeout
-from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, register
-from astrbot.api import logger
+
 import astrbot.api.message_components as Comp
+from astrbot.api import logger
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.star import Context, Star, register
 
 from . import analysis_bilibili
 from .analysis_bilibili import b23_extract, bili_keyword, search_bili_by_title
@@ -39,6 +41,14 @@ BILI_PATTERN = re.compile(
     re.I,
 )
 
+BARE_BVID_PATTERN = re.compile(r"BV[A-Za-z0-9]{10}", re.I)
+BILI_URL_SOURCE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9.-])"
+    r"(?:b23\.tv|bili(?:22|23|33|2233)\.cn|"
+    r"(?:[\w-]+\.)*bilibili\.com)(?:[/:?]|$)",
+    re.I,
+)
+
 IMAGE_SUFFIXES: Set[str] = {
     ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".jfif", ".webp",
 }
@@ -57,6 +67,69 @@ _ALLOWED_DOMAINS = (
     "bili33.cn",
 )
 
+_CARD_APP_SOURCES = {
+    "com.tencent.miniapp_01": "miniapp",
+    "com.tencent.tuwen.lua": "card",
+}
+
+
+def _classify_message_source(
+    text: str,
+    card_url: str = "",
+    card_source: str = "",
+) -> str:
+    """Classify the original message before URL normalization."""
+    if card_url:
+        return card_source if card_source in _CARD_APP_SOURCES.values() else "card"
+    if BILI_URL_SOURCE_PATTERN.search(text):
+        return "url"
+    if BARE_BVID_PATTERN.fullmatch(text.strip()):
+        return "bvid"
+    return "text"
+
+
+def _card_source_from_payload(data: dict) -> str:
+    """Return a source name for a parsed QQ JSON-card payload."""
+    return _CARD_APP_SOURCES.get(str(data.get("app", "")), "")
+
+
+def _extract_card_source(raw) -> str:
+    """Extract the QQ card kind from OneBot JSON message data."""
+    if isinstance(raw, dict):
+        source = _card_source_from_payload(raw)
+        if source:
+            return source
+        if raw.get("type") == "json":
+            raw = raw.get("data", {})
+            if isinstance(raw, dict):
+                raw = raw.get("data", "")
+
+    if isinstance(raw, list):
+        for segment in raw:
+            source = _extract_card_source(segment)
+            if source:
+                return source
+        return ""
+
+    if isinstance(raw, str):
+        raw_str = raw.strip()
+        if raw_str.startswith("{"):
+            try:
+                data = json.loads(raw_str)
+            except json.JSONDecodeError:
+                return ""
+            return _card_source_from_payload(data) if isinstance(data, dict) else ""
+        cq_match = re.search(r"\[CQ:json,data=(.*?)\]", raw_str, re.S)
+        if cq_match:
+            return _extract_card_source(
+                cq_match.group(1)
+                .replace("&amp;", "&")
+                .replace("&#44;", ",")
+                .replace("&#91;", "[")
+                .replace("&#93;", "]")
+            )
+    return ""
+
 
 def _is_allowed_domain(url: str) -> bool:
     """检查 URL 的域名是否在 bilibili 白名单内"""
@@ -73,13 +146,17 @@ def _is_allowed_domain(url: str) -> bool:
 
 
 def _find_qqdocurl(data: dict) -> str:
-    """从已解析的 JSON dict 中查找 bilibili 相关的 qqdocurl"""
+    """从已解析的 JSON 卡片中查找白名单内的 Bilibili 跳转链接。"""
     meta = data.get("meta")
     if not isinstance(meta, dict):
         return ""
     for _key, val in meta.items():
         if isinstance(val, dict):
-            url = val.get("qqdocurl", "") or val.get("url", "")
+            url = (
+                val.get("qqdocurl", "")
+                or val.get("jumpUrl", "")
+                or val.get("url", "")
+            )
             if url and _is_allowed_domain(url):
                 return url
     return ""
@@ -274,10 +351,16 @@ class BilibiliAnalysis(Star):
         else:
             return group_id not in self.group_list
 
-    @filter.event_message_type(filter.EventMessageType.ALL)
+    @filter.event_message_type(
+        filter.EventMessageType.ALL,
+        priority=maxsize - 10,
+    )
     async def on_message(self, event: AstrMessageEvent):
         """自动解析消息中的 Bilibili 链接"""
         if not self.enable_auto_parse:
+            return
+        sender_id = str(event.get_sender_id() or "")
+        if sender_id and sender_id == str(event.get_self_id() or ""):
             return
 
         # 群组白名单/黑名单检查
@@ -288,13 +371,15 @@ class BilibiliAnalysis(Star):
             return
 
         text = event.message_str.strip()
+        original_text = text
 
         # 尝试从 QQ小程序 JSON 卡片中提取 URL
         json_url = ""
+        card_source = ""
         if event.message_obj:
-            json_url = _extract_from_raw_message(
-                event.message_obj.raw_message
-            )
+            raw_message = event.message_obj.raw_message
+            json_url = _extract_from_raw_message(raw_message)
+            card_source = _extract_card_source(raw_message)
             if not json_url and event.message_obj.message:
                 for comp in event.message_obj.message:
                     raw = getattr(comp, "raw", None) or getattr(
@@ -302,12 +387,19 @@ class BilibiliAnalysis(Star):
                     )
                     if raw:
                         json_url = _extract_from_raw_message(raw)
+                        card_source = card_source or _extract_card_source(raw)
                         if json_url:
                             break
 
         # message_str 本身可能就是 JSON
         if not json_url and text.startswith("{"):
             json_url = _try_parse_json(text)
+
+        source = _classify_message_source(
+            original_text,
+            json_url,
+            card_source,
+        )
 
         if json_url:
             logger.info(f"从 JSON 卡片提取到 URL: {json_url}")
@@ -322,7 +414,12 @@ class BilibiliAnalysis(Star):
             ):
                 text = await b23_extract(text, session=session)
 
-            msg = await bili_keyword(group_id, text, session=session)
+            msg = await bili_keyword(
+                group_id,
+                text,
+                session=session,
+                source=source,
+            )
         except Exception as e:
             logger.error(f"Bilibili 解析出错: {e!r}", exc_info=True)
             return
@@ -374,7 +471,12 @@ class BilibiliAnalysis(Star):
                 yield event.plain_result("未找到相关视频")
                 return
 
-            msg = await bili_keyword(group_id, search_url, session=session)
+            msg = await bili_keyword(
+                group_id,
+                search_url,
+                session=session,
+                source="text",
+            )
         except Exception as e:
             logger.error(f"Bilibili 搜索出错: {e!r}", exc_info=True)
             yield event.plain_result("搜索出错，请稍后再试")

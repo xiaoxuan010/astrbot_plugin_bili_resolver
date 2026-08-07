@@ -70,7 +70,7 @@ https://www.bilibili.com/video/av114556558967080?p=1
 | `enable_image` | bool | `true` | 回复中是否显示封面图 |
 | `group_whitelist_mode` | bool | `false` | 白名单模式（开启=仅列表中的群生效，关闭=黑名单模式） |
 | `group_list` | list | `[]` | 群组 ID 列表 |
-| `template_preset` | string | `简洁风格` | 视频解析排版风格，见下方说明 |
+| `template_preset` | string | `原始格式` | 视频解析排版风格，见下方说明 |
 | `video_template` | text | `` | 自定义排版模板，仅在 `template_preset` 为 `自定义` 时生效 |
 
 **白名单模式**：只有列表中的群触发，其他群忽略。
@@ -94,7 +94,7 @@ https://www.bilibili.com/video/av114556558967080
 简介：-
 ```
 
-**简洁风格**（默认）：带 Emoji 的卡片格式，同时附带封面图。
+**简洁风格**：带 Emoji 的卡片格式，同时附带封面图。
 
 ```
 🎬 标题：终于知道为什么听到某些歌，反派会愣住了
@@ -130,6 +130,41 @@ https://www.bilibili.com/video/av114556558967080
 | `${BV号}` | BV 号 |
 | `${时长}` | 视频时长（格式：`m:ss` / `h:mm:ss`） |
 | `${版权}` | 原创 / 转载 |
+
+#### 按消息来源控制模板
+
+自定义模板支持来源条件：
+
+| `source` 值 | 原始消息 |
+|--------------|----------|
+| `miniapp` | QQ 小程序（`com.tencent.miniapp_01`） |
+| `card` | QQ 图文卡片（`com.tencent.tuwen.lua`） |
+| `url` | 完整链接或短链接 |
+| `bvid` | 单独发送的 BV 号 |
+| `text` | 其他可识别文本，例如带说明文字的 BV 号 |
+
+支持 `{% if %}`、`{% elif %}`、`{% else %}`、`{% endif %}`。每个控制标签独占一行，条件值使用上表中的五个固定值。含条件标签的模板会移除渲染结果末尾、紧邻控制标签的换行；现有无条件模板保持原有输出。
+
+下面的模板让小程序卡片只回复链接，链接只回复 BV 号，裸 BV 号只回复链接：
+
+```jinja2
+{% if source == "miniapp" %}
+🔗 ${链接}
+{% elif source == "card" %}
+🔗 ${链接}
+{% elif source == "url" %}
+${BV号}
+{% elif source == "bvid" %}
+${链接}
+{% else %}
+🎬 ${标题}
+👤 ${UP主}
+${封面}
+🔗 ${链接}
+{% endif %}
+```
+
+条件语法错误会写入 AstrBot 日志，并自动使用原始格式完成本次回复。
 
 ## 依赖
 
